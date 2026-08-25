@@ -3,76 +3,80 @@ const router = express.Router();
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-const { getContainer } = require('../config/database');
+const store = require('../store');
 const { authenticateToken } = require('../middleware/auth');
+const { normalizeAccommodations } = require('../shared/accommodations');
 
-// Register new user
+const DEFAULT_COACH_PIN = '0218';
+
+function signToken(user) {
+  return jwt.sign(
+    { id: user.id, username: user.username, role: user.role, coach: user.coach },
+    process.env.JWT_SECRET,
+    // A classroom iPad shouldn't silently stop recording mid-week; the
+    // frontend still forces re-login the moment a 401 comes back.
+    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+  );
+}
+
+function toResponse(user) {
+  if (!user) return user;
+  const { passwordHash, ...rest } = user;
+  rest.accommodations = normalizeAccommodations(rest.accommodations);
+  return rest;
+}
+
+// Register a new coach account (public endpoint)
 router.post('/register', async (req, res) => {
   try {
-    const { username, email, password, displayName, role = 'student' } = req.body;
+    const { username, email, password, displayName } = req.body;
 
     if (!username || !email || !password) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-
-    const container = getContainer('users');
-
-    // Check if user exists
-    const { resources: existingUsers } = await container.items
-      .query({
-        query: 'SELECT * FROM c WHERE c.username = @username OR c.email = @email',
-        parameters: [
-          { name: '@username', value: username },
-          { name: '@email', value: email }
-        ]
-      })
-      .fetchAll();
-
-    if (existingUsers.length > 0) {
-      return res.status(409).json({ error: 'Username or email already exists' });
+    if (String(password).length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
 
-    // Hash password
+    // Username must not clash with another login-capable account (students
+    // without passwords don't block a coach name); email must be unique.
+    const sameName = await store.findUsersByUsername(username);
+    if (sameName.some((u) => u.passwordHash)) {
+      return res.status(409).json({ error: 'Username already exists' });
+    }
+    const emailConflict = await store.findUserConflict({ username: '', email });
+    if (emailConflict) {
+      return res.status(409).json({ error: 'Email already exists' });
+    }
+
     const passwordHash = await bcrypt.hash(password, 12);
 
-    // Create user
     const user = {
       id: uuidv4(),
       type: 'user',
+      coach: uuidv4(), // each coach account gets its own partition
       username,
       email,
       passwordHash,
       displayName: displayName || username,
-      role,
-      accommodations: {
-        registerKeyboard: ['bills', 'keypad'],
-        buttonSize: false,
-        minimizeChoices: 0
-      },
+      role: 'admin',
+      coachPin: DEFAULT_COACH_PIN,
+      accommodations: normalizeAccommodations(null),
+      notes: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
 
-    await container.items.create(user);
+    await store.createUser(user);
 
-    // Generate token
-    const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
-    );
-
-    // Remove password hash from response
-    const { passwordHash, ...userResponse } = user;
-
-    res.status(201).json({ user: userResponse, token });
+    res.status(201).json({ user: toResponse(user), token: signToken(user) });
   } catch (error) {
     console.error('Register error:', error);
     res.status(500).json({ error: 'Registration failed' });
   }
 });
 
-// Login
+// Login (coach accounts — students sign in on-device through the coach session)
 router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -81,38 +85,26 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Username and password required' });
     }
 
-    const container = getContainer('users');
-
-    const { resources: users } = await container.items
-      .query({
-        query: 'SELECT * FROM c WHERE c.username = @username',
-        parameters: [{ name: '@username', value: username }]
-      })
-      .fetchAll();
-
-    if (users.length === 0) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    const user = users[0];
-
-    // Verify password
-    const validPassword = await bcrypt.compare(password, user.passwordHash);
-    if (!validPassword) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    // Generate token
-    const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
+    // Several accounts can share a username across coaches (e.g. a
+    // password-less student named like a coach) — only password-bearing
+    // accounts can log in, and we check each candidate.
+    const candidates = (await store.findUsersByUsername(username)).filter(
+      (u) => u.passwordHash
     );
 
-    // Remove password hash from response
-    const { passwordHash, ...userResponse } = user;
+    let user = null;
+    for (const candidate of candidates) {
+      if (await bcrypt.compare(password, candidate.passwordHash)) {
+        user = candidate;
+        break;
+      }
+    }
 
-    res.json({ user: userResponse, token });
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    res.json({ user: toResponse(user), token: signToken(user) });
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed' });
@@ -122,44 +114,46 @@ router.post('/login', async (req, res) => {
 // Get current user
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    const container = getContainer('users');
-
-    const { resource: user } = await container.item(req.user.id, 'user').read();
-
+    const user = await store.getUserById(req.user.id, req.user.coach);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-
-    const { passwordHash, ...userResponse } = user;
-    res.json({ user: userResponse });
+    res.json({ user: toResponse(user) });
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({ error: 'Failed to fetch user' });
   }
 });
 
-// Update user profile
+// Update current user profile
 router.put('/me', authenticateToken, async (req, res) => {
   try {
-    const { displayName, email, accommodations } = req.body;
-    const container = getContainer('users');
+    const { displayName, email, accommodations, coachPin } = req.body;
 
-    const { resource: user } = await container.item(req.user.id, 'user').read();
-
+    const user = await store.getUserById(req.user.id, req.user.coach);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Update fields
     if (displayName) user.displayName = displayName;
     if (email) user.email = email;
-    if (accommodations) user.accommodations = { ...user.accommodations, ...accommodations };
+    if (accommodations) {
+      user.accommodations = normalizeAccommodations({
+        ...user.accommodations,
+        ...accommodations
+      });
+    }
+    if (coachPin !== undefined && user.role === 'admin') {
+      const pin = String(coachPin).replace(/\D/g, '');
+      if (pin.length !== 4) {
+        return res.status(400).json({ error: 'Coach PIN must be exactly 4 digits' });
+      }
+      user.coachPin = pin;
+    }
     user.updatedAt = new Date().toISOString();
 
-    const { resource: updatedUser } = await container.item(req.user.id, 'user').replace(user);
-
-    const { passwordHash, ...userResponse } = updatedUser;
-    res.json({ user: userResponse });
+    const updated = await store.replaceUser(user);
+    res.json({ user: toResponse(updated) });
   } catch (error) {
     console.error('Update user error:', error);
     res.status(500).json({ error: 'Failed to update user' });

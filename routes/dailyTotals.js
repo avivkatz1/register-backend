@@ -1,62 +1,64 @@
 const express = require('express');
 const router = express.Router();
-const { getContainer } = require('../config/database');
+const store = require('../store');
 const { authenticateToken } = require('../middleware/auth');
+const { blankDailyTotal, aggregateDailyTotals } = require('../shared/stats');
 
 router.use(authenticateToken);
+
+function emptyTotal(date) {
+  const t = blankDailyTotal('none', date);
+  delete t.id;
+  delete t.coach;
+  delete t.type;
+  return t;
+}
+
+// Dashboard summary: today / this month / this year, aggregated.
+// The client passes its local date (?date=YYYY-MM-DD) so "today" matches the
+// classroom clock, not the server's timezone. Must be declared before /:date.
+router.get('/summary', async (req, res) => {
+  try {
+    const today =
+      req.query.date && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
+        ? req.query.date
+        : new Date().toISOString().split('T')[0];
+
+    const year = today.slice(0, 4);
+    const month = today.slice(0, 7);
+
+    const yearDocs = await store.listDailyTotalsRange(
+      req.user.coach,
+      `${year}-01-01`,
+      `${year}-12-31`
+    );
+    const monthDocs = yearDocs.filter((d) => d.date && d.date.startsWith(month));
+    const todayDocs = yearDocs.filter((d) => d.date === today);
+
+    res.json({
+      date: today,
+      today: aggregateDailyTotals(todayDocs, 'Today'),
+      month: aggregateDailyTotals(monthDocs, 'This Month'),
+      year: aggregateDailyTotals(yearDocs, 'This Year')
+    });
+  } catch (error) {
+    console.error('Get summary error:', error);
+    res.status(500).json({ error: 'Failed to fetch summary' });
+  }
+});
 
 // Get today's totals
 router.get('/today', async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
-    const container = getContainer('dailyTotals');
-
-    try {
-      const { resource: dailyTotal } = await container.item(`daily-${today}`, today).read();
-      res.json({ dailyTotal });
-    } catch (error) {
-      // Return empty totals if not found
-      res.json({
-        dailyTotal: {
-          date: today,
-          totalTransactions: 0,
-          totalMoneyProcessed: 0,
-          totalItemsSold: 0,
-          userStats: {},
-          itemBreakdown: {}
-        }
-      });
-    }
+    const today =
+      req.query.date && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
+        ? req.query.date
+        : new Date().toISOString().split('T')[0];
+    const dailyTotal = await store.getDailyTotal(`daily-${req.user.coach}-${today}`, req.user.coach);
+    res.json({ dailyTotal: dailyTotal || emptyTotal(today) });
   } catch (error) {
     console.error('Get today totals error:', error);
-    res.status(500).json({ error: 'Failed to fetch today\'s totals' });
-  }
-});
-
-// Get specific date totals
-router.get('/:date', async (req, res) => {
-  try {
-    const { date } = req.params;
-    const container = getContainer('dailyTotals');
-
-    try {
-      const { resource: dailyTotal } = await container.item(`daily-${date}`, date).read();
-      res.json({ dailyTotal });
-    } catch (error) {
-      res.json({
-        dailyTotal: {
-          date,
-          totalTransactions: 0,
-          totalMoneyProcessed: 0,
-          totalItemsSold: 0,
-          userStats: {},
-          itemBreakdown: {}
-        }
-      });
-    }
-  } catch (error) {
-    console.error('Get date totals error:', error);
-    res.status(500).json({ error: 'Failed to fetch daily totals' });
+    res.status(500).json({ error: "Failed to fetch today's totals" });
   }
 });
 
@@ -64,27 +66,26 @@ router.get('/:date', async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-
     if (!startDate || !endDate) {
       return res.status(400).json({ error: 'startDate and endDate are required' });
     }
-
-    const container = getContainer('dailyTotals');
-
-    const { resources: dailyTotals } = await container.items
-      .query({
-        query: 'SELECT * FROM c WHERE c.date >= @startDate AND c.date <= @endDate ORDER BY c.date',
-        parameters: [
-          { name: '@startDate', value: startDate },
-          { name: '@endDate', value: endDate }
-        ]
-      })
-      .fetchAll();
-
+    const dailyTotals = await store.listDailyTotalsRange(req.user.coach, startDate, endDate);
     res.json({ dailyTotals });
   } catch (error) {
     console.error('Get date range totals error:', error);
     res.status(500).json({ error: 'Failed to fetch date range totals' });
+  }
+});
+
+// Get specific date totals (keep last — catches /:date)
+router.get('/:date', async (req, res) => {
+  try {
+    const { date } = req.params;
+    const dailyTotal = await store.getDailyTotal(`daily-${req.user.coach}-${date}`, req.user.coach);
+    res.json({ dailyTotal: dailyTotal || emptyTotal(date) });
+  } catch (error) {
+    console.error('Get date totals error:', error);
+    res.status(500).json({ error: 'Failed to fetch daily totals' });
   }
 });
 

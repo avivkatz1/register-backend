@@ -2,39 +2,45 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const store = require('./store');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Behind Azure App Service / proxies
+app.set('trust proxy', 1);
 
 // Middleware
 app.use(express.json());
 
 // CORS configuration
 const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',')
+  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
   : ['http://localhost:3000'];
 
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
+    credentials: true
+  })
+);
 
-// Rate limiting
+// Rate limiting (configurable so a busy classroom on one IP isn't locked out)
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: parseInt(process.env.RATE_LIMIT_MAX || '600', 10),
   message: 'Too many requests from this IP, please try again later.'
 });
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5, // Limit login attempts
+  max: parseInt(process.env.AUTH_RATE_LIMIT_MAX || '20', 10),
   message: 'Too many login attempts, please try again later.'
 });
 
@@ -42,21 +48,21 @@ app.use('/api/', limiter);
 app.use('/api/auth/login', authLimiter);
 
 // Routes
-const authRoutes = require('./routes/auth');
-const transactionRoutes = require('./routes/transactions');
-const userRoutes = require('./routes/users');
-const dailyTotalsRoutes = require('./routes/dailyTotals');
-const helpRoutes = require('./routes/help');
-
-app.use('/api/auth', authRoutes);
-app.use('/api/transactions', transactionRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/daily-totals', dailyTotalsRoutes);
-app.use('/api/help', helpRoutes);
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/transactions', require('./routes/transactions'));
+app.use('/api/users', require('./routes/users'));
+app.use('/api/daily-totals', require('./routes/dailyTotals'));
+app.use('/api/help', require('./routes/help'));
+app.use('/api/events', require('./routes/events'));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', provider: store.provider, timestamp: new Date().toISOString() });
+});
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Route not found' });
 });
 
 // Error handling middleware
@@ -68,15 +74,22 @@ app.use((err, req, res, next) => {
   });
 });
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ error: 'Route not found' });
-});
+// Start server after the store is ready
+async function start() {
+  try {
+    await store.init();
+  } catch (err) {
+    console.error('Store initialization failed:', err.message);
+    console.error('Continuing to serve; requests may fail until the database is reachable.');
+  }
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT} (db: ${store.provider})`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  });
+}
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-});
+if (require.main === module) {
+  start();
+}
 
 module.exports = app;

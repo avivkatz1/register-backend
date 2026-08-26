@@ -170,6 +170,51 @@ async function listDailyTotalsRange(coach, startDate, endDate) {
   );
 }
 
+/* ---------------- menu items ---------------- */
+
+async function listMenuItems(coach) {
+  // Sort in JS: Cosmos ORDER BY drops docs missing the property, and "order"
+  // is a reserved word there anyway.
+  const items = await queryAll(
+    'SELECT * FROM c WHERE c.coach = @coach AND c.type = "menuItem"',
+    [{ name: '@coach', value: coach }]
+  );
+  return items.sort((a, b) => (a.order || 0) - (b.order || 0));
+}
+
+async function createMenuItem(item) {
+  const { resource } = await getContainer().items.create(item);
+  return resource;
+}
+
+async function getMenuItem(id, coach) {
+  return readItem(id, coach);
+}
+
+async function replaceMenuItem(item) {
+  const { resource } = await getContainer().item(item.id, item.coach).replace(item);
+  return resource;
+}
+
+async function deleteMenuItem(id, coach) {
+  try {
+    await getContainer().item(id, coach).delete();
+  } catch (err) {
+    if (err.code !== 404) throw err;
+  }
+}
+
+/* ---------------- small meta docs (e.g. menu seeded marker) ---------------- */
+
+async function getMetaDoc(id, coach) {
+  return readItem(id, coach);
+}
+
+async function upsertMetaDoc(doc) {
+  const { resource } = await getContainer().items.upsert(doc);
+  return resource;
+}
+
 /* ---------------- help requests ---------------- */
 
 async function createHelpRequest(doc) {
@@ -211,6 +256,13 @@ module.exports = {
   getDailyTotal,
   upsertDailyTotal,
   listDailyTotalsRange,
+  listMenuItems,
+  createMenuItem,
+  getMenuItem,
+  replaceMenuItem,
+  deleteMenuItem,
+  getMetaDoc,
+  upsertMetaDoc,
   createHelpRequest,
   listPendingHelpRequests,
   getHelpRequest,

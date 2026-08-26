@@ -14,7 +14,7 @@ const path = require('path');
 const DATA_FILE =
   process.env.LOCAL_DB_FILE || path.join(__dirname, '..', 'data', 'local-db.json');
 
-let db = { users: [], transactions: [], dailyTotals: [], helpRequests: [] };
+let db = { users: [], transactions: [], dailyTotals: [], helpRequests: [], menuItems: [], metaDocs: [] };
 let saveTimer = null;
 
 function load() {
@@ -26,7 +26,9 @@ function load() {
         users: parsed.users || [],
         transactions: parsed.transactions || [],
         dailyTotals: parsed.dailyTotals || [],
-        helpRequests: parsed.helpRequests || []
+        helpRequests: parsed.helpRequests || [],
+        menuItems: parsed.menuItems || [],
+        metaDocs: parsed.metaDocs || []
       };
     }
   } catch (err) {
@@ -166,6 +168,59 @@ async function listDailyTotalsRange(coach, startDate, endDate) {
   );
 }
 
+/* ---------------- menu items ---------------- */
+
+async function listMenuItems(coach) {
+  return clone(
+    db.menuItems.filter((m) => m.coach === coach).sort((a, b) => (a.order || 0) - (b.order || 0))
+  );
+}
+
+async function createMenuItem(item) {
+  // Mirror Cosmos: a duplicate id within the coach partition is a conflict
+  if (db.menuItems.some((m) => m.id === item.id && m.coach === item.coach)) {
+    const err = new Error('Menu item id conflict');
+    err.code = 409;
+    throw err;
+  }
+  db.menuItems.push(clone(item));
+  persist();
+  return clone(item);
+}
+
+async function getMenuItem(id, coach) {
+  return clone(db.menuItems.find((m) => m.id === id && m.coach === coach));
+}
+
+async function replaceMenuItem(item) {
+  const idx = db.menuItems.findIndex((m) => m.id === item.id);
+  if (idx === -1) throw new Error('Menu item not found');
+  db.menuItems[idx] = clone(item);
+  persist();
+  return clone(item);
+}
+
+async function deleteMenuItem(id, coach) {
+  db.menuItems = db.menuItems.filter((m) => !(m.id === id && m.coach === coach));
+  persist();
+}
+
+/* ---------------- small meta docs (e.g. menu seeded marker) ---------------- */
+
+async function getMetaDoc(id, coach) {
+  if (!db.metaDocs) db.metaDocs = [];
+  return clone(db.metaDocs.find((d) => d.id === id && d.coach === coach));
+}
+
+async function upsertMetaDoc(doc) {
+  if (!db.metaDocs) db.metaDocs = [];
+  const idx = db.metaDocs.findIndex((d) => d.id === doc.id);
+  if (idx === -1) db.metaDocs.push(clone(doc));
+  else db.metaDocs[idx] = clone(doc);
+  persist();
+  return clone(doc);
+}
+
 /* ---------------- help requests ---------------- */
 
 async function createHelpRequest(doc) {
@@ -212,6 +267,13 @@ module.exports = {
   getDailyTotal,
   upsertDailyTotal,
   listDailyTotalsRange,
+  listMenuItems,
+  createMenuItem,
+  getMenuItem,
+  replaceMenuItem,
+  deleteMenuItem,
+  getMetaDoc,
+  upsertMetaDoc,
   createHelpRequest,
   listPendingHelpRequests,
   getHelpRequest,

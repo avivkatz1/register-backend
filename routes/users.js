@@ -9,13 +9,44 @@ const { normalizeAccommodations } = require('../shared/accommodations');
 // All routes require an authenticated coach
 router.use(authenticateToken, requireRole('admin', 'teacher'));
 
+const DEFAULT_QUICK_OBSERVATIONS = {
+  errors: [
+    'Rang up wrong product',
+    'Said wrong number',
+    'Counted change wrong',
+    'Pressed wrong button'
+  ],
+  positives: [
+    'Counted change correctly',
+    'Handled entire transaction without intervention',
+    'Great customer service'
+  ]
+};
+
 function toResponse(user) {
   if (!user) return user;
   // coachPin stays out of roster responses — it's only returned by /auth/me
   const { passwordHash, coachPin, ...rest } = user;
   rest.accommodations = normalizeAccommodations(rest.accommodations);
   rest.notes = rest.notes || [];
+  rest.observations = rest.observations || [];
+  rest.quickObservations = {
+    errors:
+      (rest.quickObservations && rest.quickObservations.errors) ||
+      DEFAULT_QUICK_OBSERVATIONS.errors,
+    positives:
+      (rest.quickObservations && rest.quickObservations.positives) ||
+      DEFAULT_QUICK_OBSERVATIONS.positives
+  };
   return rest;
+}
+
+function sanitizeQuickList(list, fallback) {
+  if (!Array.isArray(list)) return fallback;
+  return list
+    .map((s) => String(s).trim())
+    .filter(Boolean)
+    .slice(0, 20);
 }
 
 // Slugify a display name into a unique username within the coach's roster
@@ -36,7 +67,10 @@ async function makeStudentUsername(coach, displayName) {
 // Get roster (all users under this coach)
 router.get('/', async (req, res) => {
   try {
-    const users = await store.listUsersByCoach(req.user.coach);
+    const allUsers = await store.listUsersByCoach(req.user.coach);
+    // Filter out archived students unless explicitly requested
+    const includeArchived = req.query.includeArchived === 'true';
+    const users = includeArchived ? allUsers : allUsers.filter(u => !u.archived);
     res.json({ users: users.map(toResponse) });
   } catch (error) {
     console.error('Get users error:', error);
@@ -96,7 +130,8 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { username, email, displayName, role, accommodations, password } = req.body;
+    const { username, email, displayName, role, accommodations, password, quickObservations } =
+      req.body;
 
     const user = await store.getUserById(id, req.user.coach);
     if (!user) {
@@ -125,6 +160,15 @@ router.put('/:id', async (req, res) => {
         ...accommodations
       });
     }
+    if (quickObservations) {
+      user.quickObservations = {
+        errors: sanitizeQuickList(quickObservations.errors, DEFAULT_QUICK_OBSERVATIONS.errors),
+        positives: sanitizeQuickList(
+          quickObservations.positives,
+          DEFAULT_QUICK_OBSERVATIONS.positives
+        )
+      };
+    }
     user.updatedAt = new Date().toISOString();
 
     const updated = await store.replaceUser(user);
@@ -135,18 +179,87 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// Delete a user
+/* ---------------- coach observations (errors & positives) ---------------- */
+
+// Log an observation for a student
+router.post('/:id/observations', async (req, res) => {
+  try {
+    const { type, label, comment } = req.body;
+    if (!['error', 'positive'].includes(type)) {
+      return res.status(400).json({ error: 'type must be "error" or "positive"' });
+    }
+    if ((!label || !String(label).trim()) && (!comment || !String(comment).trim())) {
+      return res.status(400).json({ error: 'A label or comment is required' });
+    }
+
+    const user = await store.getUserById(req.params.id, req.user.coach);
+    if (!user) return res.status(404).json({ error: 'Student not found' });
+
+    const observation = {
+      id: uuidv4(),
+      type,
+      label: String(label || '').trim().slice(0, 200),
+      comment: String(comment || '').trim().slice(0, 2000),
+      author: req.user.username,
+      createdAt: new Date().toISOString(),
+      date: new Date().toISOString().split('T')[0]
+    };
+
+    user.observations = user.observations || [];
+    user.observations.unshift(observation);
+    // Cap so the user document never grows unbounded
+    if (user.observations.length > 500) user.observations = user.observations.slice(0, 500);
+    user.updatedAt = new Date().toISOString();
+
+    await store.replaceUser(user);
+    res.status(201).json({ observation, user: toResponse(user) });
+  } catch (error) {
+    console.error('Add observation error:', error);
+    res.status(500).json({ error: 'Failed to log observation' });
+  }
+});
+
+// Remove an observation
+router.delete('/:id/observations/:obsId', async (req, res) => {
+  try {
+    const user = await store.getUserById(req.params.id, req.user.coach);
+    if (!user) return res.status(404).json({ error: 'Student not found' });
+
+    user.observations = (user.observations || []).filter((o) => o.id !== req.params.obsId);
+    user.updatedAt = new Date().toISOString();
+
+    await store.replaceUser(user);
+    res.json({ user: toResponse(user) });
+  } catch (error) {
+    console.error('Delete observation error:', error);
+    res.status(500).json({ error: 'Failed to remove observation' });
+  }
+});
+
+// Delete a user (soft delete - archives the student instead of hard deleting)
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (id === req.user.id) {
       return res.status(400).json({ error: 'You cannot delete your own account here' });
     }
-    await store.deleteUser(id, req.user.coach);
-    res.json({ message: 'User deleted successfully' });
+
+    const user = await store.getUserById(id, req.user.coach);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Soft delete: mark as archived instead of deleting
+    user.archived = true;
+    user.archivedAt = new Date().toISOString();
+    user.archivedBy = req.user.username;
+    user.updatedAt = new Date().toISOString();
+
+    await store.replaceUser(user);
+    res.json({ message: 'User archived successfully' });
   } catch (error) {
-    console.error('Delete user error:', error);
-    res.status(500).json({ error: 'Failed to delete user' });
+    console.error('Archive user error:', error);
+    res.status(500).json({ error: 'Failed to archive user' });
   }
 });
 
@@ -218,6 +331,33 @@ router.delete('/:id/notes/:noteId', async (req, res) => {
   } catch (error) {
     console.error('Delete note error:', error);
     res.status(500).json({ error: 'Failed to delete note' });
+  }
+});
+
+// Restore an archived user
+router.post('/:id/restore', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await store.getUserById(id, req.user.coach);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (!user.archived) {
+      return res.status(400).json({ error: 'User is not archived' });
+    }
+
+    // Restore the user
+    user.archived = false;
+    user.restoredAt = new Date().toISOString();
+    user.restoredBy = req.user.username;
+    user.updatedAt = new Date().toISOString();
+
+    await store.replaceUser(user);
+    res.json({ message: 'User restored successfully', user: toResponse(user) });
+  } catch (error) {
+    console.error('Restore user error:', error);
+    res.status(500).json({ error: 'Failed to restore user' });
   }
 });
 

@@ -132,10 +132,56 @@ router.post('/', requireRole('admin', 'teacher'), async (req, res) => {
   }
 });
 
+// Reorder the whole menu (coach only): body { ids: [itemId, ...] } in the
+// desired order. Items not listed keep their relative order at the end.
+router.post('/reorder', requireRole('admin', 'teacher'), async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string')) {
+      return res.status(400).json({ error: 'ids must be an array of item ids' });
+    }
+
+    const items = await store.listMenuItems(req.user.coach);
+    const byId = {};
+    items.forEach((item) => {
+      byId[item.id] = item;
+    });
+
+    let order = 0;
+    const now = new Date().toISOString();
+    for (const id of ids) {
+      const item = byId[id];
+      if (!item) continue; // stale id from another device — skip
+      if (item.order !== order) {
+        item.order = order;
+        item.updatedAt = now;
+        await store.replaceMenuItem(item);
+      }
+      order += 1;
+      delete byId[id];
+    }
+    // Anything the client didn't mention (e.g. added meanwhile) goes after
+    for (const item of items) {
+      if (!byId[item.id]) continue;
+      if (item.order !== order) {
+        item.order = order;
+        item.updatedAt = now;
+        await store.replaceMenuItem(item);
+      }
+      order += 1;
+    }
+
+    res.json({ items: await store.listMenuItems(req.user.coach) });
+  } catch (error) {
+    console.error('Reorder menu error:', error);
+    res.status(500).json({ error: 'Failed to reorder items' });
+  }
+});
+
 // Edit an item (coach only)
 router.put('/:id', requireRole('admin', 'teacher'), async (req, res) => {
   try {
-    const { text, cost, imageData } = req.body;
+    const { text, cost, imageData, active } = req.body;
     const item = await store.getMenuItem(req.params.id, req.user.coach);
     if (!item) return res.status(404).json({ error: 'Item not found' });
 
@@ -156,6 +202,11 @@ router.put('/:id', requireRole('admin', 'teacher'), async (req, res) => {
       }
       item.imageData = imageData;
       item.imageKey = null;
+    }
+    if (typeof active === 'boolean') {
+      // Hidden (e.g. out of stock) items stay on the coach's list but are
+      // filtered out of the student register
+      item.active = active;
     }
     item.updatedAt = new Date().toISOString();
 

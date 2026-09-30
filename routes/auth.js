@@ -128,7 +128,7 @@ router.get('/me', authenticateToken, async (req, res) => {
 // Update current user profile
 router.put('/me', authenticateToken, async (req, res) => {
   try {
-    const { displayName, email, accommodations, coachPin } = req.body;
+    const { displayName, email, accommodations, coachPin, colorScheme } = req.body;
 
     const user = await store.getUserById(req.user.id, req.user.coach);
     if (!user) {
@@ -149,6 +149,9 @@ router.put('/me', authenticateToken, async (req, res) => {
         return res.status(400).json({ error: 'Coach PIN must be exactly 4 digits' });
       }
       user.coachPin = pin;
+    }
+    if (colorScheme !== undefined) {
+      user.colorScheme = colorScheme;
     }
     user.updatedAt = new Date().toISOString();
 

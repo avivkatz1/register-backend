@@ -130,7 +130,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { username, email, displayName, role, accommodations, password, quickObservations } =
+    const { username, email, displayName, role, accommodations, password, quickObservations, colorScheme, customImages } =
       req.body;
 
     const user = await store.getUserById(id, req.user.coach);
@@ -168,6 +168,12 @@ router.put('/:id', async (req, res) => {
           DEFAULT_QUICK_OBSERVATIONS.positives
         )
       };
+    }
+    if (colorScheme !== undefined) {
+      user.colorScheme = colorScheme;
+    }
+    if (customImages !== undefined) {
+      user.customImages = customImages;
     }
     user.updatedAt = new Date().toISOString();
 

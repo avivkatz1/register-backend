@@ -8,3 +8,7 @@ yarn-error.log*
 
 # Local JSON store
 data/local-db.json*
+
+# Image blending temporary files
+temp_uploads/
+scripts/test_output/

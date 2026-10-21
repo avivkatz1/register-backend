@@ -10,8 +10,8 @@ const PORT = process.env.PORT || 3001;
 // Behind Azure App Service / proxies
 app.set('trust proxy', 1);
 
-// Middleware (limit raised for menu-item photos sent as data URLs)
-app.use(express.json({ limit: '1mb' }));
+// Middleware (limit raised for menu-item photos and blended images sent as data URLs)
+app.use(express.json({ limit: '50mb' }));
 
 // CORS configuration
 const allowedOrigins = process.env.ALLOWED_ORIGINS
@@ -55,6 +55,7 @@ app.use('/api/daily-totals', require('./routes/dailyTotals'));
 app.use('/api/help', require('./routes/help'));
 app.use('/api/events', require('./routes/events'));
 app.use('/api/menu', require('./routes/menu'));
+app.use('/api/blending-images', require('./routes/blendingImages'));
 
 // Health check endpoint
 app.get('/health', (req, res) => {

@@ -11,14 +11,20 @@ import cv2
 import numpy as np
 import json
 
-def resize_images_to_match(images):
-    """Resize all images to match the smallest dimensions"""
+def resize_images_to_match(images, max_dimension=800):
+    """Resize all images to match the smallest dimensions and limit max size"""
     if not images:
         return []
 
     # Find minimum dimensions across all images
     min_h = min(img.shape[0] for img in images)
     min_w = min(img.shape[1] for img in images)
+
+    # Limit dimensions to max_dimension to reduce memory usage
+    if min_h > max_dimension or min_w > max_dimension:
+        scale = max_dimension / max(min_h, min_w)
+        min_h = int(min_h * scale)
+        min_w = int(min_w * scale)
 
     # Resize all images to match
     resized = []
